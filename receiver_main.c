@@ -9,7 +9,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 
-#define MAXBUFLEN 500
+#define MAXBUFLEN 600
 
 typedef struct tcpheader{
 	int pkt_id;
@@ -35,7 +35,7 @@ char* get_ack_msg(int ack_id){
 int readPacket(FILE *fp, receiver_window* rwnd, char* msg, int data_size){
 	tcpheader* theader = (tcpheader *)msg;
 	char* data = (char *)(theader + 1);
-	printf("received packet data size: %d with byte %d, contains %s\n", theader->size, data_size, data);
+	printf("###received packet data size: %d with byte %d, pkt_id: %d\n", theader->size, data_size, theader->pkt_id);
 	if(rwnd->expected_id == theader->pkt_id){
 		if(theader->final_pck == 1){
 			rwnd->received_final_pkt = 1;
@@ -128,7 +128,7 @@ void reliablyReceive(unsigned short int myUDPport, char* destinationFile){
 		}
 		//printf("listener: packet contains \"%s\"\n", buf);
 		if(numbytes > 0){
-			printf("received packets\n");
+			//printf("received packets\n");
 			int ack_id = readPacket(fp, rwnd, buf, numbytes);
 			if(ack_id != -1){
 				char* msg = get_ack_msg(ack_id);

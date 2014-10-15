@@ -29,7 +29,6 @@ typedef struct tcp{
 	struct sockaddr *to;
 	size_t tolen;
 	struct congest_win* cwd;
-	int last_ack_id;
 	int dup_ack_num;
 	int final_pid;
 }tcp;
@@ -84,6 +83,9 @@ char* writePacket(FILE *fp, tcpheader* th)
 		th->size = msg->size;
 		printf("packet contains %s, data size: %d\n", data_head_pointer, msg->size);
 	}
+	else{
+		printf("final packet");
+	}
 
 	return (char*)msg;
 }
@@ -91,7 +93,6 @@ char* writePacket(FILE *fp, tcpheader* th)
 void tcp_init(struct tcp* t, struct sockaddr *to, size_t tolen, unsigned long long int bytesToTransfer){
 	t->to = to;
 	t->tolen = tolen;
-	t->last_ack_id = 0;
 	t->dup_ack_num = 0;
 	t->cwd = malloc(sizeof(struct congest_win));
 	t->final_pid = bytesToTransfer%DATA_BYTES == 0? 
@@ -136,6 +137,7 @@ void tcp_send(int sockfd, FILE* fp, struct tcp* t, int from_pid, int to_pid, int
 		char* msg = writePacket(fp, &th);
 		if(th.size == 0){
 			//reach the end of file
+			printf("Final packet id: %d\n", i);
 			tcpheader* thead = (tcpheader*)msg;
 			thead->final_pck = 1;
 			t->final_pid = th.pkt_id;
@@ -143,6 +145,7 @@ void tcp_send(int sockfd, FILE* fp, struct tcp* t, int from_pid, int to_pid, int
 		int pkt_size = th.size + sizeof(tcpheader);
 
 		int numbytes;
+		printf("Sent packet with size %d", pkt_size);
 		if ((numbytes = sendto(sockfd, (void *)msg, pkt_size, 0,
 				 t->to, t->tolen)) == -1) {
 			perror("talker: sendto");
@@ -189,10 +192,9 @@ void read_ack(struct tcp* t, char* msg, int numbytes){
 	if(numbytes < sizeof(tcpack)) return ;
 
 	tcpack* data = (tcpack* )msg;
-	printf("ack_id : %d\n", data->ack_id);
+	printf("ack_id : %d, unack_pkt_id: %d\nwindow size:%d\n", data->ack_id, t->cwd->unack_pkt_id, t->cwd->size);
 	if(data->ack_id == t->cwd->unack_pkt_id){
 		t->cwd->unack_pkt_id++;
-		t->last_ack_id = data->ack_id;
 		if(iss(t->cwd)){
 			t->cwd->size++;
 		}
@@ -200,6 +202,7 @@ void read_ack(struct tcp* t, char* msg, int numbytes){
 			t->cwd->ca_rev_count++;
 			if(t->cwd->ca_rev_count >= t->cwd->size){
 				t->cwd->size++;
+				t->cwd->ca_rev_count = 0;
 			}
 		}
 	}
@@ -207,6 +210,7 @@ void read_ack(struct tcp* t, char* msg, int numbytes){
 		t->dup_ack_num++;
 		if(t->dup_ack_num == 3){
 			cut_congest_win(t, 0);
+			t->dup_ack_num = 0;
 		}
 	}
 
