@@ -8,8 +8,17 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <time.h>
 
-#define MAXBUFLEN 600
+#define MAXBUFLEN 10100
+#define BUFFER_TABLE_SIZE 300
+#define TIMEOUT_TO_QUIT 5
+
+typedef struct buffered_pkt{
+	int pkt_id;
+	char* data;
+	int length;
+}bpkt;
 
 typedef struct tcpheader{
 	int pkt_id;
@@ -24,6 +33,7 @@ typedef struct tcpack{
 typedef struct receiver_window{
 	int expected_id;
 	int received_final_pkt;
+	unsigned int total_received;
 }receiver_window;
 
 char* get_ack_msg(int ack_id){
@@ -32,10 +42,45 @@ char* get_ack_msg(int ack_id){
 	return (char*)(tack);
 }
 
-int readPacket(FILE *fp, receiver_window* rwnd, char* msg, int data_size){
+void buffer_pkt(bpkt** oooBuffer, int pkt_id, char* data, int p_len){
+	int key = pkt_id%BUFFER_TABLE_SIZE;
+	if(oooBuffer[key] == NULL){
+		oooBuffer[key] = malloc(sizeof(bpkt));
+		oooBuffer[key]->pkt_id = pkt_id;
+		oooBuffer[key]->data = (char*)malloc(sizeof(char) *p_len);
+		memcpy(oooBuffer[key]->data, data, p_len);
+		oooBuffer[key]->length = p_len;
+	}
+}
+
+void remove_pkt(bpkt** oooBuffer, int pkt_id){
+	int key= pkt_id % BUFFER_TABLE_SIZE;
+	if(oooBuffer[key] != NULL && pkt_id == oooBuffer[key]->pkt_id){
+		free(oooBuffer[key]->data);
+		free(oooBuffer[key]);
+		oooBuffer[key] = NULL;
+	}
+}
+
+void check_buffer(bpkt** oooBuffer, receiver_window* rwnd, FILE* fp){
+	while(1){
+		int key = rwnd->expected_id % BUFFER_TABLE_SIZE;
+		if(oooBuffer[key] != NULL && oooBuffer[key]->pkt_id == rwnd->expected_id){
+			fwrite(oooBuffer[key]->data, sizeof(char),oooBuffer[key]->length, fp);
+			rwnd->expected_id++;
+			remove_pkt(oooBuffer, oooBuffer[key]->pkt_id);
+			if((rwnd->expected_id-1) % 10 == 0){fflush(fp);}
+		}
+		else break;
+	}
+	return;
+}
+
+int readPacket(FILE *fp, receiver_window* rwnd, char* msg, int data_size, bpkt** oooBuffer){
 	tcpheader* theader = (tcpheader *)msg;
 	char* data = (char *)(theader + 1);
-	printf("###received packet data size: %d with byte %d, pkt_id: %d\n", theader->size, data_size, theader->pkt_id);
+	//printf("###received packet data size: %d with byte %d, pkt_id: %d\n", theader->size, data_size, theader->pkt_id);
+	////printf("------Content:------\n%s\n---------------\n", data);
 	if(rwnd->expected_id == theader->pkt_id){
 		if(theader->final_pck == 1){
 			rwnd->received_final_pkt = 1;
@@ -45,15 +90,19 @@ int readPacket(FILE *fp, receiver_window* rwnd, char* msg, int data_size){
 			fwrite((char *)(theader+1), sizeof(char),theader->size, fp);
 			rwnd->expected_id++;
 			if(theader->pkt_id % 10 == 0){fflush(fp);}
+			remove_pkt(oooBuffer, rwnd->expected_id-1);
+			check_buffer(oooBuffer, rwnd, fp);
 		}
-		return rwnd->expected_id-1;
+		
 	}
 	else if(rwnd->expected_id < theader->pkt_id){
-		return rwnd->expected_id-1;
+		buffer_pkt(oooBuffer, theader->pkt_id, (char *)(theader+1), theader->size);
+		//return rwnd->expected_id-1;
 	}
 	else{
-		return -1;
+		//return -1;
 	}
+	return rwnd->expected_id-1;
 }
 
 
@@ -76,6 +125,11 @@ void reliablyReceive(unsigned short int myUDPport, char* destinationFile){
 	char buf[MAXBUFLEN];
 	socklen_t addr_len;
 	char s[INET6_ADDRSTRLEN];
+	bpkt *oooBuffer[BUFFER_TABLE_SIZE];
+	int i = 0;
+	for(; i < BUFFER_TABLE_SIZE; i++){
+		oooBuffer[i] = NULL;
+	}
 
 	memset(&hints, 0, sizeof hints);
 	hints.ai_family = AF_UNSPEC; // set to AF_INET to force IPv4
@@ -112,48 +166,66 @@ void reliablyReceive(unsigned short int myUDPport, char* destinationFile){
 
 	freeaddrinfo(servinfo);
 
-	printf("listener: waiting to recvfrom...\n");
+	//printf("listener: waiting to recvfrom...\n");
 
 	addr_len = sizeof their_addr;
 
 	receiver_window* rwnd = malloc(sizeof(receiver_window));
 	rwnd->expected_id = 1;
 	rwnd->received_final_pkt = 0;
-	FILE* fp = fopen(destinationFile, "ab");
+	rwnd->total_received = 0;
+	FILE* fp = fopen(destinationFile, "wb");
+	int sendDup = 3;
+	int flag = 0;
 	while(1){
+		//set timeout
+		struct timeval tv;
+		tv.tv_sec = TIMEOUT_TO_QUIT;
+		tv.tv_usec = 0;
+		if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO,&tv,sizeof(tv)) < 0) {
+		    perror("Set timeout Error");
+		}
+
 		if ((numbytes = recvfrom(sockfd, buf, MAXBUFLEN-1 , 0,
 			(struct sockaddr *)&their_addr, &addr_len)) == -1) {
-			perror("recvfrom");
+			perror("recvfrom timeout");
+			fclose(fp);
+			close(sockfd);
 			exit(1);
 		}
-		//printf("listener: packet contains \"%s\"\n", buf);
+		////printf("listener: packet contains \"%s\"\n", buf);
 		if(numbytes > 0){
-			//printf("received packets\n");
-			int ack_id = readPacket(fp, rwnd, buf, numbytes);
+			rwnd->total_received++;
+			////printf("received packets\n");
+			int ack_id = readPacket(fp, rwnd, buf, numbytes, oooBuffer);
 			if(ack_id != -1){
+				//if(ack_id % sendDup == 0){ack_id = ack_id - 1;}
+				//if(ack_id >= 5 && flag <= 5) {flag++; continue;}
 				char* msg = get_ack_msg(ack_id);
 				int numbytes2;
 				if ((numbytes2 = sendto(sockfd, msg, sizeof(msg), 0, (struct sockaddr *)&their_addr, addr_len)) == -1) {
 					perror("talker: sendto");
 					exit(1);
 				};
+				//printf("send out ack_id: %d with bytes: %d\n", ack_id, numbytes2);
 				free(msg);
 				if(rwnd->received_final_pkt){
-					printf("received all packets, exit.\n");
+					//printf("received all packets, exit.\n");
+					printf("Total received: %d\n", rwnd->total_received);
 					fclose(fp);
 					exit(0);
 				}
 			}
 		}
 		/*
-		printf("listener: got packet from %s\n",
+		//printf("listener: got packet from %s\n",
 			inet_ntop(their_addr.ss_family,
 				get_in_addr((struct sockaddr *)&their_addr),
 				s, sizeof s));
-		printf("listener: packet is %d bytes long\n", numbytes);
+		//printf("listener: packet is %d bytes long\n", numbytes);
 		*/
 		//buf[numbytes] = '\0';
-		//printf("listener: packet contains \"%s\"\n", buf);
+		////printf("listener: packet contains \"%s\"\n", buf);
 	}
 	fclose(fp);
 	close(sockfd);
