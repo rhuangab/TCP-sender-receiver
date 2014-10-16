@@ -205,7 +205,7 @@ void reliablyReceive(unsigned short int myUDPport, char* destinationFile){
 				int numbytes2;
 				if ((numbytes2 = sendto(sockfd, msg, sizeof(msg), 0, (struct sockaddr *)&their_addr, addr_len)) == -1) {
 					perror("talker: sendto");
-					exit(1);
+					exit(1); 
 				};
 				//printf("send out ack_id: %d with bytes: %d\n", ack_id, numbytes2);
 				free(msg);
