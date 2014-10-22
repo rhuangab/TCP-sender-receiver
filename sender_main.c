@@ -9,9 +9,10 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <time.h>
+#include <unistd.h>
 #define DATA_BYTES 10000
-#define THRESHOLD 200
-#define TIMEOUT 25 * CLOCKS_PER_SEC /1000
+#define THRESHOLD 100
+#define TIMEOUT 30 * CLOCKS_PER_SEC /1000
 #define MAXBUFLEN 500
 
 typedef struct congest_win{
@@ -96,7 +97,7 @@ void tcp_init(struct tcp* t, struct sockaddr *to, size_t tolen, unsigned long lo
 	t->to = to;
 	t->tolen = tolen;
 	t->dup_ack_num = 0;
-	t->cwd = malloc(sizeof(struct congest_win));
+	t->cwd = (congest_win*) malloc(sizeof(struct congest_win));
 	t->final_pid = bytesToTransfer%DATA_BYTES == 0? 
 		bytesToTransfer/DATA_BYTES + 1
 		:bytesToTransfer/DATA_BYTES + 2;
@@ -105,7 +106,7 @@ void tcp_init(struct tcp* t, struct sockaddr *to, size_t tolen, unsigned long lo
 		DATA_BYTES
 		:bytesToTransfer%DATA_BYTES;
 	//initialize cwd
-	t->cwd->size = 1;
+	t->cwd->size = 10;
 	t->cwd->threshold = THRESHOLD;
 	t->cwd->unack_pkt_id = 1;
 	t->cwd->next_pkt_id = 1;
@@ -113,7 +114,6 @@ void tcp_init(struct tcp* t, struct sockaddr *to, size_t tolen, unsigned long lo
 	t->cwd->timeout = TIMEOUT;
 	t->cwd->ca_rev_count = 0;
 	t->total_sent = 0;
-
 }
 
 void tcp_send(int sockfd, FILE* fp, struct tcp* t, int from_pid, int to_pid){
@@ -164,6 +164,7 @@ void tcp_send(int sockfd, FILE* fp, struct tcp* t, int from_pid, int to_pid){
 		t->cwd->next_pkt_id++;
 		if(t->final_pid == t->cwd->next_pkt_id - 1) break;
 		////printf("talker: sent %d bytes to %s\n", numbytes, t->to->sa_data);
+		//usleep(1);
 	}
 }
 
@@ -186,21 +187,21 @@ void cut_congest_win(struct tcp* t, int choice){
 		t->cwd->next_pkt_id = t->cwd->unack_pkt_id;
 		t->cwd->ca_rev_count = 0;
 		t->dup_ack_num = 0;
-		if(t->cwd->threshold < 1){
-			t->cwd->threshold = 1;
+		if(t->cwd->threshold < 20){
+			t->cwd->threshold = 20;
 		}
 	}
 	else{
 		//timeout
 		t->cwd->threshold = t->cwd->size/2;
-		t->cwd->size = 1;
+		t->cwd->size = 10;
 		t->cwd->next_pkt_id = t->cwd->unack_pkt_id;
 		t->cwd->ca_rev_count = 0;
 		t->dup_ack_num = 0;
-		if(t->cwd->threshold < 1)
-			t->cwd->threshold = 1;
+		if(t->cwd->threshold < 20)
+			t->cwd->threshold = 20;
 	}
-	t->cwd->timer = clock();
+	//t->cwd->timer = clock();
 }
 
 void read_ack(struct tcp* t, char* msg, int numbytes){
@@ -210,6 +211,7 @@ void read_ack(struct tcp* t, char* msg, int numbytes){
 	if(data->ack_id >= t->cwd->unack_pkt_id){
 		int new_acks = data->ack_id - t->cwd->unack_pkt_id + 1;
 		t->cwd->unack_pkt_id = data->ack_id + 1;
+		t->dup_ack_num = 0;
 		if(iss(t->cwd)){
 			t->cwd->size += new_acks;
 		}
@@ -223,7 +225,7 @@ void read_ack(struct tcp* t, char* msg, int numbytes){
 	}
 	else if(data->ack_id == t->cwd->unack_pkt_id - 1){
 		t->dup_ack_num++;
-		if(t->dup_ack_num == 3){
+		if(t->dup_ack_num >= 3){
 			cut_congest_win(t, 0);
 			t->dup_ack_num = 0;
 		}
@@ -270,7 +272,7 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
 	}
 
 	FILE* fp = fopen(filename,"rb");
-	struct tcp* t = malloc(sizeof(tcp));
+	struct tcp* t = (tcp*) malloc(sizeof(tcp));
 	tcp_init(t, p->ai_addr, p->ai_addrlen, bytesToTransfer);
 	struct congest_win* cwd = t->cwd;
 	int totimes = 0;
@@ -296,7 +298,7 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
 		tv.tv_sec = 0;
 		tv.tv_usec = 25000;
 				
-		clock_gettime(CLOCK_REALTIME,&tsp);
+		//clock_gettime(CLOCK_REALTIME,&tsp);
 		if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO,&tv,sizeof(tv)) < 0) {
 		    perror("Set timeout Error");
 		}
@@ -304,12 +306,12 @@ void reliablyTransfer(char* hostname, unsigned short int hostUDPport, char* file
 		if ((numbytes = recvfrom(sockfd, buf, MAXBUFLEN-1 , 0,
 			(struct sockaddr *)&their_addr, &addr_len)) == -1) {
 			totimes++;
-			//printf("Timeout\n");
-			clock_gettime(CLOCK_REALTIME,&tsp);
-			//printf("clock_time: %li\n", tsp.tv_nsec/1000000);
 			cut_congest_win(t, 1);
-			//if(totimes > 2) break;
 			continue;
+			//printf("Timeout\n");
+			//clock_gettime(CLOCK_REALTIME,&tsp);
+			//printf("clock_time: %li\n", tsp.tv_nsec/1000000);
+			//if(totimes > 2) break;
 			//perror("recvfrom");
 		}
 		////printf("listener: packet contains \"%s\"\n", buf);

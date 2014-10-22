@@ -10,9 +10,10 @@
 #include <netdb.h>
 #include <time.h>
 
-#define MAXBUFLEN 10100
-#define BUFFER_TABLE_SIZE 300
+#define MAXBUFLEN 20100
+#define BUFFER_TABLE_SIZE 50
 #define TIMEOUT_TO_QUIT 5
+#define MAX_DUP_ACK 4
 
 typedef struct buffered_pkt{
 	int pkt_id;
@@ -37,7 +38,7 @@ typedef struct receiver_window{
 }receiver_window;
 
 char* get_ack_msg(int ack_id){
-	tcpack* tack = malloc(sizeof(tack));
+	tcpack* tack = (tcpack*) malloc(sizeof(tack));
 	tack->ack_id = ack_id;
 	return (char*)(tack);
 }
@@ -45,7 +46,7 @@ char* get_ack_msg(int ack_id){
 void buffer_pkt(bpkt** oooBuffer, int pkt_id, char* data, int p_len){
 	int key = pkt_id%BUFFER_TABLE_SIZE;
 	if(oooBuffer[key] == NULL){
-		oooBuffer[key] = malloc(sizeof(bpkt));
+		oooBuffer[key] =  (bpkt*) malloc(sizeof(bpkt));
 		oooBuffer[key]->pkt_id = pkt_id;
 		oooBuffer[key]->data = (char*)malloc(sizeof(char) *p_len);
 		memcpy(oooBuffer[key]->data, data, p_len);
@@ -69,7 +70,7 @@ void check_buffer(bpkt** oooBuffer, receiver_window* rwnd, FILE* fp){
 			fwrite(oooBuffer[key]->data, sizeof(char),oooBuffer[key]->length, fp);
 			rwnd->expected_id++;
 			remove_pkt(oooBuffer, oooBuffer[key]->pkt_id);
-			if((rwnd->expected_id-1) % 10 == 0){fflush(fp);}
+			if((rwnd->expected_id-1) % 200 == 0){fflush(fp);}
 		}
 		else break;
 	}
@@ -89,7 +90,7 @@ int readPacket(FILE *fp, receiver_window* rwnd, char* msg, int data_size, bpkt**
 		else{
 			fwrite((char *)(theader+1), sizeof(char),theader->size, fp);
 			rwnd->expected_id++;
-			if(theader->pkt_id % 10 == 0){fflush(fp);}
+			if(theader->pkt_id % 200 == 0){fflush(fp);}
 			remove_pkt(oooBuffer, rwnd->expected_id-1);
 			check_buffer(oooBuffer, rwnd, fp);
 		}
@@ -166,22 +167,22 @@ void reliablyReceive(unsigned short int myUDPport, char* destinationFile){
 
 	freeaddrinfo(servinfo);
 
-	//printf("listener: waiting to recvfrom...\n");
-
 	addr_len = sizeof their_addr;
 
-	receiver_window* rwnd = malloc(sizeof(receiver_window));
+	receiver_window* rwnd = (receiver_window*)malloc(sizeof(receiver_window));
 	rwnd->expected_id = 1;
 	rwnd->received_final_pkt = 0;
 	rwnd->total_received = 0;
 	FILE* fp = fopen(destinationFile, "wb");
 	int sendDup = 3;
 	int flag = 0;
+	//set timeout
+	struct timeval tv;
+	tv.tv_sec = TIMEOUT_TO_QUIT;
+	tv.tv_usec = 0;
+	int last_ack_id = -2;
+	int dup_times = 0;
 	while(1){
-		//set timeout
-		struct timeval tv;
-		tv.tv_sec = TIMEOUT_TO_QUIT;
-		tv.tv_usec = 0;
 		if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO,&tv,sizeof(tv)) < 0) {
 		    perror("Set timeout Error");
 		}
@@ -199,16 +200,26 @@ void reliablyReceive(unsigned short int myUDPport, char* destinationFile){
 			////printf("received packets\n");
 			int ack_id = readPacket(fp, rwnd, buf, numbytes, oooBuffer);
 			if(ack_id != -1){
-				//if(ack_id % sendDup == 0){ack_id = ack_id - 1;}
-				//if(ack_id >= 5 && flag <= 5) {flag++; continue;}
-				char* msg = get_ack_msg(ack_id);
+				//send at most 3 dup ack in a row
+				if(last_ack_id != ack_id) {
+					last_ack_id = ack_id;
+					dup_times = 0;
+				}
+				else{
+					++dup_times;
+					if(dup_times >= MAX_DUP_ACK) continue;
+				}
+
+				tcpack tack;
+				tack.ack_id = ack_id;
+				char* msg = (char*)&tack;
 				int numbytes2;
-				if ((numbytes2 = sendto(sockfd, msg, sizeof(msg), 0, (struct sockaddr *)&their_addr, addr_len)) == -1) {
+				if ((numbytes2 = sendto(sockfd, msg, sizeof(tcpack), 0, (struct sockaddr *)&their_addr, addr_len)) == -1) {
 					perror("talker: sendto");
 					exit(1); 
 				};
 				//printf("send out ack_id: %d with bytes: %d\n", ack_id, numbytes2);
-				free(msg);
+				//free(msg);
 				if(rwnd->received_final_pkt){
 					//printf("received all packets, exit.\n");
 					printf("Total received: %d\n", rwnd->total_received);
@@ -217,15 +228,6 @@ void reliablyReceive(unsigned short int myUDPport, char* destinationFile){
 				}
 			}
 		}
-		/*
-		//printf("listener: got packet from %s\n",
-			inet_ntop(their_addr.ss_family,
-				get_in_addr((struct sockaddr *)&their_addr),
-				s, sizeof s));
-		//printf("listener: packet is %d bytes long\n", numbytes);
-		*/
-		//buf[numbytes] = '\0';
-		////printf("listener: packet contains \"%s\"\n", buf);
 	}
 	fclose(fp);
 	close(sockfd);
